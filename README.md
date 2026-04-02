@@ -1,140 +1,89 @@
 # B2B Data Cleaner API
 
-**Transforme dados brutos de lead em contexto acionável para vendas** — em uma única chamada REST.
+## 🚀 Sobre o Projeto
 
-API **assíncrona** construída em **FastAPI**, com **validação determinística** (e-mail e CNPJ em Python) e **enriquecimento semântico** via **DeepSeek** (LLM), orquestrado para **custo previsível**: cache em memória com **TTL** e **single-flight** evitam chamadas redundantes à IA quando o mesmo lead se repete.
+API REST assíncrona que recebe dados básicos de um lead B2B (`nome`, `email`, `cnpj`), valida **e-mail** e **CNPJ** em Python e usa a API **DeepSeek** (via cliente OpenAI assíncrono) para enriquecer o lead a partir do **nome**.
 
----
-
-## Por que isso importa
-
-| Para o produto | O que entrega |
-|----------------|---------------|
-| **Time comercial** | Nome padronizado, **setor estimado**, **perfil de vendas** e um **`sales_hook`** em parágrafo — material pronto para abordagem. |
-| **Operação / dados** | **E-mail** e **CNPJ** validados antes de gastar token; **`is_garbage`** sinaliza leads claramente inúteis. |
-| **Engenharia** | Contratos **Pydantic v2**, **OpenAPI** nativo, erros HTTP consistentes, testes com **pytest** + mocks da IA. |
+**Problema que endereça:** padronizar e enriquecer informações de prospecção sem depender da IA para validações estruturais (formato de e-mail e CNPJ), reduzindo chamadas desnecessárias à LLM quando o mesmo nome já foi processado (cache em memória com TTL).
 
 ---
 
-## Destaques técnicos
+## ⚙️ Funcionalidades
 
-- **Async end-to-end** — `async`/`await` na API e na integração com o cliente OpenAI (`AsyncOpenAI`).
-- **Separação de responsabilidades** — regras estruturais em **Python puro**; inferência e redação no **LLM** (`temperature: 0` para respostas mais estáveis).
-- **Cache inteligente** — chave normalizada por nome; deduplicação concorrente (uma computação por chave sob carga paralela).
-- **Observabilidade mínima** — `GET /health` para probes; `GET /` com links úteis.
-
----
-
-## Stack
-
-| Camada | Tecnologia |
-|--------|------------|
-| Framework | **FastAPI**, **Pydantic v2**, **Uvicorn** |
-| IA | **OpenAI SDK** → endpoint **DeepSeek** (`base_url` configurável) |
-| Validação CNPJ | **pycpfcnpj** + fallback algorítmico |
-| Cache | Memória, **TTL** configurável, **single-flight** por chave |
+- Validação de **e-mail** com regex e normalização (`strip`).
+- Validação de **CNPJ** com `pycpfcnpj` e fallback algorítmico local se a lib falhar.
+- **Enriquecimento por IA** a partir do nome: `nome_padronizado`, `setor_estimado`, `perfil_vendas` (limitado a 10 palavras no pós-processamento), `sales_hook` (parágrafo, até 2000 caracteres no schema), `is_garbage`.
+- **Cache em memória** com TTL configurável e padrão single-flight para evitar computações duplicadas concorrentes para a mesma chave.
+- **Tratamento global de erros** (validação Pydantic, HTTPException, falhas de parsing/resposta da IA).
+- Documentação automática **OpenAPI** (Swagger UI em `/docs`).
+- Rotas auxiliares: metadados na raiz (`/`) e **health check** (`/health`).
+- Suíte de **testes** com `pytest` (validadores, cache, serviço com mock da IA, integração HTTP via ASGI).
 
 ---
 
-## Fluxo resumido
+## 🧠 Como Funciona
 
-1. **Entrada:** `nome`, `email`, `cnpj`.
-2. **Python:** valida formato de e-mail e dígitos do CNPJ; normaliza saída do CNPJ (somente dígitos).
-3. **LLM:** enriquece a partir do nome — padronização, setor, perfil, gancho comercial, flag de lixo.
-4. **Cache:** hits repetidos devolvem o mesmo objeto enriquecido até expirar o TTL.
-
----
-
-## Variáveis de ambiente
-
-Copie `.env.example` para `.env` e preencha.
-
-| Variável | Obrigatória | Descrição |
-|----------|-------------|-----------|
-| `DEEPSEEK_API_KEY` | Sim | Chave da API DeepSeek |
-| `DEEPSEEK_BASE_URL` | Não | Padrão: `https://api.deepseek.com` |
-| `DEEPSEEK_MODEL` | Não | Padrão: `deepseek-chat` |
-| `CACHE_TTL_SECONDS` | Não | Padrão: `86400` |
+1. O cliente envia `POST /validate/lead` com `nome`, `email` e `cnpj`.
+2. O corpo é validado pelo **Pydantic**; em seguida o fluxo valida e-mail e CNPJ com funções em `app/services/validators.py`.
+3. Se tudo estiver válido, o **`CleaningService`** monta a chave de cache a partir do nome normalizado e, em caso de miss, chama a DeepSeek com `temperature=0`, esperando um **JSON** com os campos de enriquecimento.
+4. O texto de `sales_hook` passa por pós-processamento (normalização de espaços, regras para evitar frases claramente truncadas e garantir fechamento com pontuação quando aplicável).
+5. A resposta agrega os campos enriquecidos com `email` e `cnpj` (este último somente dígitos).
 
 ---
 
-## Instalação e execução
+## 🛠️ Tecnologias
+
+- **Python 3.10+** (recomendado; ambiente de desenvolvimento com 3.12 é compatível com o projeto)
+- **FastAPI**
+- **Uvicorn** (servidor ASGI)
+- **Pydantic v2** e **pydantic-settings** (configuração e variáveis de ambiente, inclusive `.env`)
+- **OpenAI Python SDK** (`openai`), com `AsyncOpenAI` apontando para o endpoint da **DeepSeek**
+- **pycpfcnpj** (validação de CNPJ)
+- **pytest**, **pytest-asyncio**, **httpx** (dependências de teste em `requirements-dev.txt`)
+
+---
+
+## 📦 Como Rodar o Projeto
+
+1. Clone o repositório e entre na pasta do projeto.
+2. Crie o ambiente virtual e ative-o.
+3. Copie `.env.example` para `.env` e defina `DEEPSEEK_API_KEY` (obrigatório para subir a aplicação com as configurações atuais).
+4. Instale dependências:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate   # Linux/macOS
 pip install -r requirements.txt
+```
+
+5. Inicie o servidor:
+
+```bash
 uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-**PowerShell (Windows):**
+6. Acesse a documentação interativa: `http://127.0.0.1:8000/docs`
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-uvicorn main:app --host 127.0.0.1 --port 8000 --reload
-```
-
-| URL | Uso |
-|-----|-----|
-| `http://127.0.0.1:8000/` | Metadados + links |
-| `http://127.0.0.1:8000/health` | Health check |
-| `http://127.0.0.1:8000/docs` | **Swagger UI** (OpenAPI interativo) |
-
----
-
-## API — `POST /validate/lead`
-
-**Request (JSON)**
-
-| Campo | Tipo | Regras |
-|-------|------|--------|
-| `nome` | string | 1–200 caracteres |
-| `email` | string | 3–320 caracteres; validação por regex |
-| `cnpj` | string | 11–18 caracteres; CNPJ válido (dígitos verificadores) |
-
-**Response (JSON)**
-
-| Campo | Descrição |
-|-------|-----------|
-| `nome_padronizado` | Nome limpo / capitalização |
-| `setor_estimado` | Setor inferido (ex.: Varejo, Saúde) |
-| `perfil_vendas` | Linha curta de contexto (até 10 palavras após pós-processamento) |
-| `sales_hook` | Parágrafo de abordagem (até 2000 caracteres) |
-| `is_garbage` | Indica nome claramente inválido / lixo |
-| `email` | Eco normalizado |
-| `cnpj` | 14 dígitos |
-
-**Exemplo (PowerShell):**
-
-```powershell
-curl -Method POST "http://127.0.0.1:8000/validate/lead" `
-  -ContentType "application/json" `
-  -Body '{"nome":"magazine luiza sa","email":"contato@exemplo.com","cnpj":"11.444.777/0001-61"}'
-```
-
-**HTTP:** `200` sucesso · `422` validação · `502` falha na resposta ou no parsing do JSON da IA.
-
----
-
-## Testes
+**Testes (opcional):**
 
 ```bash
 pip install -r requirements-dev.txt
 pytest -q
 ```
 
-Cobertura: validadores, cache (incl. concorrência), serviço com **mock** da IA, integração HTTP sobre **ASGI**.
+---
+
+## 🔌 Endpoints da API
+
+| Método | Rota | Descrição |
+|--------|------|-----------|
+| `GET` | `/` | Retorna nome do serviço e caminhos para documentação OpenAPI (`docs`, `openapi.json`). |
+| `GET` | `/health` | Retorna status `ok` para verificação de saúde do processo. |
+| `POST` | `/validate/lead` | Valida e-mail e CNPJ; enriquece o lead via IA a partir do `nome`; resposta conforme schema `LeadValidateResponse`. |
+
+**Códigos HTTP recorrentes:** `200` (sucesso), `422` (validação de entrada ou regras de negócio), `502` (falha ao interpretar/responder conforme esperado da IA), `500` (erro interno não tratado).
 
 ---
 
-## Segurança
+## 📌 Melhorias Futuras
 
-Não versionar **`.env`**. Repositório deve conter apenas **`.env.example`**.
-
----
-
-## Licença
-
-Defina conforme o uso (ex.: MIT, proprietário).
+- Evoluir persistência e observabilidade conforme necessidade de produção (o projeto atual não inclui banco de dados nem métricas agregadas).
+- Avaliar cache distribuído ou filas se o volume de requisições exigir escala horizontal além do processo único em memória.

@@ -1,93 +1,42 @@
 # B2B Data Cleaner API
 
-## Visão geral
-
-Dados de leads B2B costumam chegar **sujos ou inconsistentes**: nomes de empresa mal formatados, e-mails inválidos e CNPJ incorreto geram retrabalho em CRMs e quebram automações. Este projeto é uma **API REST assíncrona** que **valida dados estruturais em Python** (formato de e-mail e CNPJ brasileiro) e **enriquece e normaliza o lead a partir do nome** da empresa/contato usando o LLM **DeepSeek** via cliente compatível com OpenAI. As respostas são **contratadas por schema (Pydantic v2)** e expostas via **OpenAPI** para integração previsível.
-
-**Na prática:** payloads de lead mais uniformes para sistemas downstream, com **menos chamadas redundantes ao LLM** para o mesmo nome repetido, graças a um **cache em memória** (TTL + deduplicação single-flight por chave).
+**API de higienização e enriquecimento de leads B2B:** valida e-mail e CNPJ com regras determinísticas, padroniza o nome e devolve contexto comercial acionável — com **menos custo de LLM** em leads repetidos graças a cache com TTL.
 
 ---
 
-## Funcionalidades
+## Sobre o projeto
 
-- **API assíncrona** com **FastAPI** e **Uvicorn** (ASGI).
-- **Contratos de entrada/saída** com **Pydantic v2** (`extra` proibido nos schemas de lead).
-- **Camada de validação (Python):** regex de e-mail + trim; validação de CNPJ com **pycpfcnpj** e **fallback local** de dígitos verificadores se o caminho da biblioteca falhar.
-- **Camada de enriquecimento (LLM):** `AsyncOpenAI` apontando para **DeepSeek** (`base_url` configurável); `temperature=0`, `max_tokens=1024`; extração de JSON da resposta do modelo (inclui blocos *fenced* `json` quando presentes).
-- **Pós-processamento:** `perfil_vendas` limitado a **10 palavras**; `sales_hook` rejeitado se tiver mais de **2000** caracteres antes da normalização; `_finalize_sales_hook` normaliza espaços e aplica heurísticas de pontuação / cauda incompleta.
-- **Cache em memória** com **TTL** configurável (`CACHE_TTL_SECONDS`, padrão 86400) e comportamento **single-flight** para que requisições concorrentes ao mesmo nome normalizado compartilhem uma única computação.
-- **Handlers globais de exceção** para erros de validação, HTTP, JSON inválido da IA e falhas genéricas (`422`, `502`, `500` conforme implementado).
-- **Endpoints operacionais:** `GET /` (metadados do serviço + links da doc), `GET /health` (`{"status": "ok"}`).
-- **Testes automatizados:** `pytest`, `pytest-asyncio`, `httpx` (testes de integração ASGI com LLM mockada quando aplicável).
+Serviço pensado para **integração em pipelines de dados** e **ferramentas de CRM/automação**: times de **vendas**, **operações** e **dados** precisam de **leads consistentes** antes de segmentar, pontuar ou disparar campanhas. Esta API atua como **camada de qualidade na entrada**: recusa ruído estrutural cedo (e-mail/CNPJ inválidos) e enriquece o que passou pelo filtro — **nome padronizado**, **setor estimado**, **perfil para vendas**, **gancho de abordagem** e sinal de **nome lixo** — para decisões e cadastros mais **confiáveis**.
 
 ---
 
-## Stack tecnológica
+## O problema de negócio (e o impacto)
 
-| Camada | Tecnologia |
-|--------|------------|
-| Linguagem | Python **3.10+** |
-| Framework web | **FastAPI** |
-| Servidor | **Uvicorn** (extras `standard` no `requirements`) |
-| Validação e config | **Pydantic v2**, **pydantic-settings** (`.env`) |
-| Cliente LLM | **openai** (`AsyncOpenAI` → API DeepSeek) |
-| CNPJ | **pycpfcnpj** (+ validador de fallback interno) |
-| Testes | **pytest**, **pytest-asyncio**, **httpx** (`requirements-dev.txt`) |
+| Dor | Efeito no mundo real |
+|-----|----------------------|
+| **Dados inconsistentes** | CRM “sujo”, duplicidade semântica, relatórios mentirosos. |
+| **Leads despadronizados** | Segmentação fraca, cadência genérica, baixa relevância na abordagem. |
+| **Erros silenciosos** (e-mail/CNPJ) | Automações quebrando downstream, filas de *retry*, suporte operacional. |
+
+**O que muda com uma API assim:** **padronização** e **consistência** na origem → melhor **qualidade de dados** para **tomada de decisão**, cadastros mais **confiáveis** e base para **automação** que não depende só de regra frágil — sem prometer métricas que o código não mede.
 
 ---
 
-## Como funciona
+## Exemplo de uso (contrato real da API)
 
-1. **Entrada:** o cliente envia `nome`, `email`, `cnpj` em `POST /validate/lead`.
-2. **Validação de schema:** o Pydantic aplica limites de tamanho e rejeita campos extras.
-3. **Validação estrutural:** e-mail com trim e regex; CNPJ validado; `nome` vazio após `strip` retorna `422`.
-4. **Enriquecimento:** `CleaningService.enrich_lead` monta a chave `lead_enrichment:<nome normalizado>`. Em *miss*, chama a API de *chat completion*, faz parse de um objeto JSON com chaves obrigatórias, aplica limites de palavras e finalização de `sales_hook`, e armazena até expirar o TTL.
-5. **Saída:** a API devolve os campos enriquecidos, `email` normalizado e `cnpj` como **string de 14 dígitos**.
+> **Nota:** o contrato implementado é `nome`, `email`, `cnpj` — não há campos `company` ou `phone` neste repositório.
 
----
-
-## Arquitetura
-
-```
-Cliente
-  → FastAPI (rotas: app/api/routes, deps, erros globais)
-      → Validadores (e-mail, CNPJ) — Python puro
-      → CleaningService + InMemoryCache
-          → DeepSeek (chat.completions, AsyncOpenAI)
-  → LeadValidateResponse (Pydantic)
-```
-
-A configuração está em **`app/core/config.py`** (`Settings`: `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `CACHE_TTL_SECONDS`). O serviço de limpeza é registrado em **`app.state`** em `main.py`.
-
----
-
-## Endpoints da API
-
-| Método | Caminho | Descrição |
-|--------|---------|-----------|
-| `GET` | `/` | Retorna `service`, `docs` e caminho do `openapi.json`. |
-| `GET` | `/health` | Verificação simples: `{"status": "ok"}`. |
-| `POST` | `/validate/lead` | Valida e-mail/CNPJ/nome, executa enriquecimento via LLM, retorna `LeadValidateResponse`. |
-
-Documentação interativa: **`/docs`** (Swagger UI). Esquema OpenAPI: **`/openapi.json`**.
-
-**Códigos HTTP usuais:** `200` sucesso; `422` validação ou regra de negócio (e-mail/CNPJ/nome inválidos); `502` resposta da IA não pôde ser interpretada ou não atende ao contrato; `500` erro não tratado (mensagem genérica).
-
----
-
-## Exemplo de requisição e resposta
-
-**Requisição** (`POST /validate/lead`, `Content-Type: application/json`)
+**`POST /validate/lead`** — entrada típica (lead “sujo” / informal):
 
 ```json
 {
   "nome": "magazine luiza sa",
-  "email": "contato@exemplo.com",
+  "email": "  contato@exemplo.com  ",
   "cnpj": "11.444.777/0001-61"
 }
 ```
 
-**Resposta** (`200`) — Os textos de enriquecimento são **gerados pelo modelo**; redação e idioma variam. A forma abaixo segue o schema.
+**Resposta `200`** (trechos de enriquecimento **variam** conforme o modelo; formato fixo):
 
 ```json
 {
@@ -101,42 +50,105 @@ Documentação interativa: **`/docs`** (Swagger UI). Esquema OpenAPI: **`/openap
 }
 ```
 
-Nomes e tipos dos campos seguem **`LeadValidateRequest`** / **`LeadValidateResponse`** em `app/schemas/lead.py`.
+Schemas: `app/schemas/lead.py` (`LeadValidateRequest` / `LeadValidateResponse`).
 
 ---
 
-## Instalação e execução
+## Funcionalidades
 
-1. **Clone** o repositório e abra a raiz do projeto.
-2. **Ambiente:** copie `.env.example` para `.env` e defina **`DEEPSEEK_API_KEY`** (obrigatório em `Settings`).
-3. **Instale dependências de runtime:**
+**Qualidade e padronização**
+- Validação **determinística** de **e-mail** (regex + trim) e **CNPJ** (**pycpfcnpj** + fallback de dígitos verificadores).
+- **CNPJ** na resposta só com **14 dígitos** — formato único para CRM e integrações.
+- **Nome** passa por enriquecimento com **LLM** (padronização + contexto comercial).
 
-```bash
-pip install -r requirements.txt
+**Enriquecimento comercial (LLM DeepSeek)**
+- `nome_padronizado`, `setor_estimado`, `perfil_vendas` (até **10 palavras** após pós-processamento), `sales_hook` (parágrafo; limite **2000** caracteres no pipeline + schema), `is_garbage`.
+- Cliente **openai** (`AsyncOpenAI`), `temperature=0`, `max_tokens=1024`, parse robusto de JSON (inclui *fences* `json` quando o modelo manda).
+
+**Performance e consistência operacional**
+- **Cache em memória** + **TTL** (`CACHE_TTL_SECONDS`, padrão 86400) + **single-flight** — mesma chave de nome normalizado não dispara N chamadas concorrentes à IA.
+
+**Engenharia de API**
+- **FastAPI** + **Pydantic v2** (`extra` proibido), **OpenAPI** em `/docs` e `/openapi.json`.
+- **Handlers globais** (`422`, `502`, `500` conforme implementação).
+- **`GET /`**, **`GET /health`**, testes com **pytest** / **httpx** (integração ASGI).
+
+---
+
+## Tecnologias
+
+| Camada | Tecnologia |
+|--------|------------|
+| Linguagem | Python **3.10+** |
+| API | **FastAPI**, **Uvicorn** (ASGI, extras `standard`) |
+| Contratos & config | **Pydantic v2**, **pydantic-settings** (`.env`) |
+| LLM | **openai** (`AsyncOpenAI` → **DeepSeek**) |
+| CNPJ | **pycpfcnpj** + validador interno |
+| Testes | **pytest**, **pytest-asyncio**, **httpx** (`requirements-dev.txt`) |
+
+---
+
+## Como funciona (pipeline)
+
+1. Cliente envia `nome`, `email`, `cnpj` → `POST /validate/lead`.
+2. **Pydantic** valida limites e bloqueia campos extras.
+3. **Validação estrutural:** e-mail + CNPJ + nome não vazio → senão `422`.
+4. **`CleaningService.enrich_lead`:** chave `lead_enrichment:<nome normalizado>`; em *miss*, *chat completion* DeepSeek → JSON obrigatório → pós-processamento (`perfil_vendas`, `_finalize_sales_hook`).
+5. Resposta **enriquecida** + `email` + `cnpj` dígitos.
+
+**Arquitetura**
+
+```
+Cliente → FastAPI (routes, deps, erros)
+       → Validadores (e-mail, CNPJ)
+       → CleaningService + InMemoryCache → DeepSeek (AsyncOpenAI)
+       → LeadValidateResponse
 ```
 
-4. **Suba o servidor:**
+Config: `app/core/config.py` (`DEEPSEEK_*`, `CACHE_TTL_SECONDS`); serviço em `app.state` (`main.py`).
+
+**Endpoints**
+
+| Método | Caminho | Descrição |
+|--------|---------|-----------|
+| `GET` | `/` | `service`, `docs`, `openapi.json` |
+| `GET` | `/health` | `{"status": "ok"}` |
+| `POST` | `/validate/lead` | Valida + enriquece |
+
+**HTTP:** `200` · `422` · `502` (IA) · `500`.
+
+---
+
+## Como rodar
 
 ```bash
+# .env a partir de .env.example — obrigatório: DEEPSEEK_API_KEY
+pip install -r requirements.txt
 uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-5. Abra **`http://127.0.0.1:8000/docs`** para testar a API.
-
-**Testes:**
+Docs: `http://127.0.0.1:8000/docs`
 
 ```bash
-pip install -r requirements-dev.txt
-pytest -q
+pip install -r requirements-dev.txt && pytest -q
 ```
 
-**Segurança:** **não** faça commit do `.env`; apenas o `.env.example` deve ir para o controle de versão.
+**Segurança:** não commitar `.env`.
+
+---
+
+## Diferenciais (backend + negócio)
+
+- **Não é CRUD genérico:** há **camada de validação** (regras de negócio brasileiras — CNPJ) separada da **camada semântica** (LLM).
+- **Pensamento de custo e escala:** cache + single-flight = **menos chamadas à IA** em leads repetidos — decisão típica de **produto** em pipeline de dados.
+- **Contratos explícitos:** Pydantic + OpenAPI = integração previsível com **CRM**, **ETL** ou **orquestradores**.
+- **Tratamento de falha:** erros de validação vs. falha de parsing da IA mapeados para HTTP — operação sabe **o que** quebrou.
 
 ---
 
 ## Melhorias futuras
 
-- Substituir o cache em memória por um **armazenamento compartilhado** (ex.: Redis) em implantações com várias instâncias.
-- Incluir **persistência** (banco de dados) se for necessário histórico de leads ou auditoria — fora do escopo do código atual.
-- Adicionar **autenticação / rate limiting** no *edge* ou em *middleware* ao expor além do ambiente local.
-- Ampliar **observabilidade** (*logging* estruturado, métricas, *tracing*) conforme o alvo de deploy.
+- Cache **distribuído** (ex.: Redis) para múltiplas instâncias.
+- **Persistência** / auditoria de leads se o produto evoluir.
+- **Auth** / **rate limiting** na borda para exposição pública.
+- **Observabilidade** (logs estruturados, métricas, tracing) alinhada ao deploy.

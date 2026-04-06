@@ -22,6 +22,14 @@ Serviço pensado para **integração em pipelines de dados** e **ferramentas de 
 
 ---
 
+## 📊 Impacto
+
+Projetado para melhorar a qualidade de dados em sistemas B2B, reduzindo inconsistências e aumentando a confiabilidade das informações utilizadas em CRM e processos comerciais.
+
+Preparado para processar grandes volumes de dados e integrar com sistemas empresariais.
+
+---
+
 ## Exemplo de uso (contrato real da API)
 
 > **Nota:** o contrato implementado é `nome`, `email`, `cnpj` — não há campos `company` ou `phone` neste repositório.
